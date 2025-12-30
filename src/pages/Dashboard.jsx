@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import Header from '../components/Header'
 import Footer from '../components/Footer'
@@ -15,6 +15,10 @@ const Dashboard = () => {
   const [generatingRoadmap, setGeneratingRoadmap] = useState(false)
   const [dashboardData, setDashboardData] = useState(null)
   const [error, setError] = useState('')
+  
+  // Prevent automatic refetch on window focus/reconnect
+  const lastUserIdRef = useRef(null)
+  const hasLoadedForUserRef = useRef(false)
 
   useEffect(() => {
     if (searchParams.get('result')) {
@@ -23,13 +27,33 @@ const Dashboard = () => {
   }, [searchParams])
 
   useEffect(() => {
-    const loadDashboard = async () => {
-      if (!user) return
+    // Only load if user ID changed, prevent refetch on re-renders/focus/reconnect
+    const currentUserId = user?.id || null
+    
+    // If user hasn't changed, don't refetch - ensure loading is false
+    if (currentUserId === lastUserIdRef.current && hasLoadedForUserRef.current) {
+      // Data already loaded, ensure loading state is false
+      setLoading(false)
+      return
+    }
 
+    // If no user, reset state
+    if (!user || !currentUserId) {
+      lastUserIdRef.current = null
+      hasLoadedForUserRef.current = false
+      setLoading(false)
+      setDashboardData(null)
+      return
+    }
+
+    const loadDashboard = async () => {
       try {
+        setLoading(true)
         const data = await api.getDashboard(user.id)
         setDashboardData(data)
         setLoading(false)
+        lastUserIdRef.current = user.id
+        hasLoadedForUserRef.current = true
       } catch (err) {
         setError(err.message || 'Failed to load dashboard')
         setLoading(false)
@@ -37,7 +61,11 @@ const Dashboard = () => {
     }
 
     loadDashboard()
-  }, [user])
+  }, [user?.id]) // Use user?.id instead of user to prevent re-runs on object reference changes
+
+  // Disable automatic refetch on window focus/visibility change/network reconnect
+  // Protection is handled via refs in the loadDashboard useEffect above
+  // No event listeners needed - refs prevent refetch on re-renders
 
   const handleGenerateRoadmap = async () => {
     if (!user) return

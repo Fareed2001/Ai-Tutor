@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import Header from '../components/Header'
 import Footer from '../components/Footer'
@@ -10,33 +10,172 @@ const DiagnosticTest = () => {
   const { chapter } = useParams()
   const navigate = useNavigate()
   const { user } = useAuth()
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [diagnostic, setDiagnostic] = useState(null)
   const [answers, setAnswers] = useState({})
   const [timeLeft, setTimeLeft] = useState(30 * 60) // 30 minutes in seconds
   const [error, setError] = useState('')
+  const [checkingExisting, setCheckingExisting] = useState(true) // Check if diagnostic exists in DB
+  const [hasExistingDiagnostic, setHasExistingDiagnostic] = useState(false) // Track if diagnostic exists in database
+  
+  // Session protection: useRef for immediate check, sessionStorage for persistence
+  const diagnosticRunRef = useRef(false)
+  
+  // Get session key for this chapter
+  const getSessionKey = () => {
+    if (!user || !chapter) return null
+    return `diagnostic_run_${user.id}_${chapter}`
+  }
+  
+  // Check if diagnostic already ran in this session
+  const hasDiagnosticRun = () => {
+    const sessionKey = getSessionKey()
+    if (!sessionKey) return false
+    
+    // Check both useRef and sessionStorage
+    return diagnosticRunRef.current || sessionStorage.getItem(sessionKey) === 'true'
+  }
+  
+  // Mark diagnostic as run in this session
+  const markDiagnosticAsRun = () => {
+    const sessionKey = getSessionKey()
+    if (!sessionKey) return
+    
+    diagnosticRunRef.current = true
+    sessionStorage.setItem(sessionKey, 'true')
+  }
 
   useEffect(() => {
-    const loadDiagnostic = async () => {
-      if (!user || !chapter) {
-        navigate('/dashboard')
-        return
-      }
+    // Only check if user/chapter exists, don't auto-generate diagnostic
+    if (!user || !chapter) {
+      navigate('/dashboard')
+      return
+    }
+    
+    // Check if diagnostic already ran in this session and restore state
+    const sessionKey = getSessionKey()
+    if (sessionKey && sessionStorage.getItem(sessionKey) === 'true') {
+      diagnosticRunRef.current = true
+    }
 
+    // Check if diagnostic exists in database (persists across logouts)
+    const checkExistingDiagnostic = async () => {
       try {
-        const data = await api.generateDiagnostic(user.id, chapter)
-        setDiagnostic(data)
-        setTimeLeft(data.time_limit * 60)
-        setLoading(false)
+        const data = await api.getDiagnostic(user.id, chapter)
+        if (data && data.diagnostic_id) {
+          setHasExistingDiagnostic(true)
+        }
       } catch (err) {
-        setError(err.message || 'Failed to load diagnostic')
-        setLoading(false)
+        // No existing diagnostic found - this is fine
+        setHasExistingDiagnostic(false)
+      } finally {
+        setCheckingExisting(false)
       }
     }
 
-    loadDiagnostic()
+    checkExistingDiagnostic()
   }, [user, chapter, navigate])
+
+  // Disable automatic refetch on window focus/visibility change/network reconnect
+  // Protection is handled via session protection (sessionStorage + useRef)
+  // Diagnostic only runs on explicit button click, never automatically
+
+  // Get remaining time - prefer stored remaining_time_seconds over calculated
+  const getRemainingTime = (data, timeLimitMinutes = 30) => {
+    // First priority: use stored remaining_time_seconds from database
+    if (data.remaining_time_seconds !== undefined && data.remaining_time_seconds !== null) {
+      return Math.max(0, data.remaining_time_seconds)
+    }
+    
+    // Fallback: calculate from created_at if remaining_time_seconds not available
+    const createdAt = data.created_at
+    if (!createdAt) {
+      return timeLimitMinutes * 60
+    }
+
+    const startTime = new Date(createdAt).getTime()
+    const currentTime = new Date().getTime()
+    const elapsedSeconds = Math.floor((currentTime - startTime) / 1000)
+    const totalSeconds = timeLimitMinutes * 60
+    const remainingSeconds = Math.max(0, totalSeconds - elapsedSeconds)
+    
+    return remainingSeconds
+  }
+
+  const handleStartDiagnostic = async () => {
+    if (!user || !chapter) {
+      navigate('/dashboard')
+      return
+    }
+
+    // Session protection: prevent duplicate runs
+    if (hasDiagnosticRun()) {
+      // Diagnostic already ran in this session, do nothing
+      return
+    }
+
+    setLoading(true)
+    setError('')
+    try {
+      // This will return existing diagnostic if found, or generate new one
+      const data = await api.generateDiagnostic(user.id, chapter)
+      setDiagnostic(data)
+      
+      // Get remaining time - prefer stored remaining_time_seconds
+      const remainingTime = getRemainingTime(data, data.time_limit)
+      setTimeLeft(remainingTime)
+        
+        setLoading(false)
+        // Mark diagnostic as run after successful generation/retrieval
+        markDiagnosticAsRun()
+        // Update state to reflect that diagnostic exists
+        if (data.is_existing) {
+          setHasExistingDiagnostic(true)
+        }
+        
+        // If timer has already expired, auto-submit
+        if (remainingTime <= 0 && data.diagnostic_test && data.diagnostic_test.length > 0) {
+          // Auto-submit will be handled by the timer useEffect
+        }
+    } catch (err) {
+      setError(err.message || 'Failed to load diagnostic')
+      setLoading(false)
+      // Don't mark as run if generation failed
+    }
+  }
+
+  const handleResumeDiagnostic = async () => {
+    if (!user || !chapter) {
+      navigate('/dashboard')
+      return
+    }
+
+    setLoading(true)
+    setError('')
+    try {
+      // Get existing diagnostic from database (no Gemini call)
+      const data = await api.getDiagnostic(user.id, chapter)
+      if (data && data.diagnostic_id) {
+        setDiagnostic(data)
+        
+        // Get remaining time - prefer stored remaining_time_seconds
+        const remainingTime = getRemainingTime(data, data.time_limit)
+        setTimeLeft(remainingTime)
+        
+        setLoading(false)
+        // Mark diagnostic as run after successful retrieval (for session tracking)
+        markDiagnosticAsRun()
+        // Update state to reflect that diagnostic exists
+        setHasExistingDiagnostic(true)
+      } else {
+        throw new Error('Invalid diagnostic data received')
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to load existing diagnostic')
+      setLoading(false)
+    }
+  }
 
   const handleSubmit = useCallback(async () => {
     if (!diagnostic || !user || submitting) return
@@ -55,6 +194,42 @@ const DiagnosticTest = () => {
       setSubmitting(false)
     }
   }, [diagnostic, user, answers, submitting, navigate, chapter])
+
+  // Save timer to database periodically (every 30 seconds) and on unload
+  useEffect(() => {
+    if (!diagnostic || !diagnostic.diagnostic_id || timeLeft <= 0) return
+
+    // Save timer every 30 seconds
+    const saveInterval = setInterval(() => {
+      api.updateDiagnosticTimer(diagnostic.diagnostic_id, timeLeft).catch(err => {
+        console.error('Failed to save timer:', err)
+      })
+    }, 30000) // Save every 30 seconds
+
+    // Save timer on page unload (beforeunload)
+    const handleBeforeUnload = () => {
+      // Use sendBeacon for reliable unload saving
+      const data = JSON.stringify({
+        diagnostic_id: diagnostic.diagnostic_id,
+        remaining_time_seconds: timeLeft
+      })
+      navigator.sendBeacon(
+        `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'}/update-diagnostic-timer`,
+        new Blob([data], { type: 'application/json' })
+      )
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+
+    return () => {
+      clearInterval(saveInterval)
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+      // Final save on cleanup
+      if (diagnostic.diagnostic_id) {
+        api.updateDiagnosticTimer(diagnostic.diagnostic_id, timeLeft).catch(() => {})
+      }
+    }
+  }, [diagnostic, timeLeft])
 
   useEffect(() => {
     if (timeLeft <= 0 && diagnostic && !submitting) {
@@ -84,6 +259,79 @@ const DiagnosticTest = () => {
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
+  // Show loading while checking for existing diagnostic
+  if (checkingExisting) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
+          <p className="mt-4 text-gray-600">Checking for existing diagnostic...</p>
+        </div>
+      </div>
+    )
+  }
+
+  // Show start button if diagnostic hasn't been generated yet
+  if (!diagnostic && !loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex flex-col">
+        <Header />
+        <div className="flex-grow flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-lg p-8 max-w-md w-full text-center">
+            <div className="text-blue-600 text-5xl mb-4">📝</div>
+            <h2 className="text-2xl font-bold text-gray-900 mb-4">
+              Diagnostic Test: {chapter}
+            </h2>
+            <p className="text-gray-600 mb-6">
+              {hasExistingDiagnostic 
+                ? "You have an existing diagnostic test. Click 'Resume Diagnostic' to continue."
+                : "Click the button below to start your diagnostic test. You will have 30 minutes to complete it."}
+            </p>
+            {hasExistingDiagnostic ? (
+              <div className="bg-blue-50 border border-blue-200 text-blue-800 px-4 py-3 rounded-lg mb-6">
+                ℹ️ You have an existing diagnostic test. Click 'Resume Diagnostic' to continue.
+              </div>
+            ) : hasDiagnosticRun() && (
+              <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 rounded-lg mb-6">
+                ⚠️ Diagnostic has already been started in this session. Please complete the current test or close this tab/window to start a new session.
+              </div>
+            )}
+            {error && (
+              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-6">
+                {error}
+              </div>
+            )}
+            <div className="flex flex-col sm:flex-row gap-4 justify-center">
+              {hasExistingDiagnostic ? (
+                <Button
+                  variant="primary"
+                  onClick={handleResumeDiagnostic}
+                  disabled={loading}
+                  className="px-6 py-3"
+                >
+                  {loading ? 'Loading...' : 'Resume Diagnostic'}
+                </Button>
+              ) : (
+                <Button
+                  variant="primary"
+                  onClick={handleStartDiagnostic}
+                  disabled={loading || hasDiagnosticRun()}
+                  className="px-6 py-3"
+                >
+                  {loading ? 'Starting...' : hasDiagnosticRun() ? 'Already Started' : 'Start Diagnostic Test'}
+                </Button>
+              )}
+              <Button to="/dashboard" variant="outline" className="px-6 py-3">
+                Back to Dashboard
+              </Button>
+            </div>
+          </div>
+        </div>
+        <Footer />
+      </div>
+    )
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -104,9 +352,39 @@ const DiagnosticTest = () => {
             <div className="text-red-600 text-5xl mb-4">⚠️</div>
             <h2 className="text-2xl font-bold text-gray-900 mb-4">Error</h2>
             <p className="text-gray-600 mb-6">{error}</p>
-            <Button to="/dashboard" variant="primary">
-              Back to Dashboard
-            </Button>
+            {hasExistingDiagnostic ? (
+              <div className="bg-blue-50 border border-blue-200 text-blue-800 px-4 py-3 rounded-lg mb-6">
+                ℹ️ You have an existing diagnostic test. Click 'Resume Diagnostic' to continue.
+              </div>
+            ) : hasDiagnosticRun() && (
+              <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 rounded-lg mb-6">
+                ⚠️ Diagnostic has already been started in this session. Please complete the current test or close this tab/window to start a new session.
+              </div>
+            )}
+            <div className="flex flex-col sm:flex-row gap-4 justify-center">
+              {hasExistingDiagnostic ? (
+                <Button
+                  variant="primary"
+                  onClick={handleResumeDiagnostic}
+                  disabled={loading}
+                  className="px-6 py-3"
+                >
+                  {loading ? 'Loading...' : 'Resume Diagnostic'}
+                </Button>
+              ) : (
+                <Button
+                  variant="primary"
+                  onClick={handleStartDiagnostic}
+                  disabled={loading || hasDiagnosticRun()}
+                  className="px-6 py-3"
+                >
+                  {loading ? 'Starting...' : hasDiagnosticRun() ? 'Already Started' : 'Try Again'}
+                </Button>
+              )}
+              <Button to="/dashboard" variant="outline" className="px-6 py-3">
+                Back to Dashboard
+              </Button>
+            </div>
           </div>
         </div>
         <Footer />

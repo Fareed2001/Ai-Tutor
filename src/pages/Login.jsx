@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useState, useEffect } from 'react'
+import { Link, useNavigate, useLocation } from 'react-router-dom'
 import Header from '../components/Header'
 import Footer from '../components/Footer'
 import Button from '../components/Button'
@@ -7,12 +7,23 @@ import { supabase } from '../lib/supabase'
 
 const Login = () => {
   const navigate = useNavigate()
+  const location = useLocation()
   const [formData, setFormData] = useState({
     username: '',
     password: '',
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [successMessage, setSuccessMessage] = useState('')
+
+  useEffect(() => {
+    // Check if redirected from password reset
+    if (location.state?.message) {
+      setSuccessMessage(location.state.message)
+      // Clear the message from location state
+      window.history.replaceState({}, document.title)
+    }
+  }, [location])
 
   const handleChange = (e) => {
     setFormData({
@@ -122,6 +133,12 @@ const Login = () => {
               </div>
             </div>
 
+            {successMessage && (
+              <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm">
+                {successMessage}
+              </div>
+            )}
+
             {error && (
               <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
                 {error}
@@ -141,9 +158,9 @@ const Login = () => {
                 </label>
               </div>
               <div className="text-sm">
-                <a href="#" className="font-medium text-blue-600 hover:text-blue-500">
+                <Link to="/forgot-password" className="font-medium text-blue-600 hover:text-blue-500">
                   Forgot password?
-                </a>
+                </Link>
               </div>
             </div>
 

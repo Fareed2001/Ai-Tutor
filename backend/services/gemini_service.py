@@ -14,12 +14,21 @@ class GeminiService:
         self.model = genai.GenerativeModel('models/gemini-2.5-flash-lite')
     
     def _safe_generate_content(self, prompt: str, fallback_prompt: str = None) -> str:
-        """Safely generate content with fallback if prompt is empty"""
-        if not prompt or prompt.strip() == "":
-            if fallback_prompt:
+        """
+        Safely generate content with fallback if prompt is empty or null.
+        Ensures Gemini is NEVER called with an empty prompt.
+        """
+        # Check if prompt is None, empty, or whitespace-only
+        if prompt is None or not prompt or not prompt.strip():
+            if fallback_prompt and fallback_prompt.strip():
                 prompt = fallback_prompt
             else:
+                # Default fallback if no fallback provided
                 prompt = "Explain the basics of chemistry in simple terms."
+        
+        # Final safety check - ensure prompt is not empty before calling Gemini
+        if not prompt or not prompt.strip():
+            raise ValueError("Cannot call Gemini with empty prompt. Fallback prompt is also empty.")
         
         try:
             response = self.model.generate_content(prompt)
@@ -87,7 +96,8 @@ Expected Output format:
 
 Generate diagnostic test for {chapter} chapter. Return JSON only, no explanations."""
 
-        fallback_prompt = f"""Generate 5 basic multiple-choice questions about {chapter} in chemistry. Return JSON format with questions, options A-D, and correct answers."""
+        # Fallback prompt if main prompt is empty - ensure it's never empty
+        fallback_prompt = f"Run a basic diagnostic explanation for {chapter}."
 
         try:
             response_text = self._safe_generate_content(prompt, fallback_prompt)

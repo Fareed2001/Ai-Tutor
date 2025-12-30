@@ -23,6 +23,46 @@ AVAILABLE_CHAPTERS = ["Stoichiometry"]
 def health():
     return jsonify({"status": "healthy"}), 200
 
+@app.route('/reset-password', methods=['POST'])
+def reset_password():
+    """
+    Reset user password by username
+    Uses service role to update password directly (no email verification needed for dummy emails)
+    """
+    try:
+        data = request.json
+        username = data.get('username')
+        new_password = data.get('new_password')
+        
+        # Validate request
+        if not username or not new_password:
+            return jsonify({"error": "Missing username or new_password"}), 400
+        
+        if len(new_password) < 6:
+            return jsonify({"error": "Password must be at least 6 characters long"}), 400
+        
+        # Normalize username
+        normalized_username = username.lower()
+        
+        # Get user profile by username
+        user_profile = supabase_service.get_user_by_username(normalized_username)
+        if not user_profile:
+            return jsonify({"error": "Username not found"}), 404
+        
+        user_id = user_profile.get('id')
+        if not user_id:
+            return jsonify({"error": "Invalid user profile"}), 400
+        
+        # Update password using service role
+        success = supabase_service.update_user_password(user_id, new_password)
+        if not success:
+            return jsonify({"error": "Failed to update password"}), 500
+        
+        return jsonify({"message": "Password reset successfully"}), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/generate-diagnostic', methods=['POST'])
 def generate_diagnostic():
     try:
@@ -37,15 +77,44 @@ def generate_diagnostic():
         if chapter not in AVAILABLE_CHAPTERS:
             return jsonify({"error": f"Chapter '{chapter}' not available"}), 400
         
-        # Check if user has already taken diagnostic for this chapter
-        existing = supabase_service.get_diagnostic_result(user_id, chapter)
-        if existing:
+        # Check if user has already submitted diagnostic for this chapter
+        existing_result = supabase_service.get_diagnostic_result(user_id, chapter)
+        if existing_result:
             return jsonify({
-                "error": "Diagnostic already completed for this chapter",
-                "existing_result": existing
+                "error": "Diagnostic already completed"
             }), 400
         
-        # Generate diagnostic using Gemini
+        # Check if diagnostic was already generated (even if not submitted)
+        # If exists, return it instead of generating new one (prevents Gemini call)
+        existing_diagnostic = supabase_service.get_existing_diagnostic(user_id, chapter)
+        if existing_diagnostic:
+            test_data = existing_diagnostic.get('test_data', {})
+            # Use stored remaining_time_seconds if available, otherwise calculate from created_at
+            remaining_time = existing_diagnostic.get('remaining_time_seconds')
+            if remaining_time is None:
+                # Fallback: calculate from created_at if remaining_time_seconds not set
+                created_at = existing_diagnostic.get('created_at')
+                if created_at:
+                    from datetime import datetime, timezone
+                    start_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    current_time = datetime.now(timezone.utc)
+                    elapsed_seconds = int((current_time - start_time).total_seconds())
+                    remaining_time = max(0, (30 * 60) - elapsed_seconds)
+                else:
+                    remaining_time = 30 * 60
+            
+            return jsonify({
+                "diagnostic_id": existing_diagnostic.get('id'),
+                "chapter": chapter,
+                "diagnostic_test": test_data.get("diagnostic_test", []),
+                "total_questions": len(test_data.get("diagnostic_test", [])),
+                "time_limit": 30,
+                "created_at": existing_diagnostic.get('created_at'),
+                "remaining_time_seconds": remaining_time,  # Use stored or calculated remaining time
+                "is_existing": True  # Flag to indicate this is an existing diagnostic
+            }), 200
+        
+        # Generate diagnostic using Gemini (only if no existing diagnostic found)
         diagnostic = gemini_service.generate_diagnostic(chapter)
         
         if diagnostic.get("error"):
@@ -54,13 +123,118 @@ def generate_diagnostic():
         # Store diagnostic in database
         diagnostic_id = supabase_service.save_diagnostic(user_id, chapter, diagnostic)
         
+        # Get the saved diagnostic to return remaining_time_seconds
+        saved_diagnostic = supabase_service.get_diagnostic(diagnostic_id)
+        created_at = saved_diagnostic.get('created_at') if saved_diagnostic else None
+        remaining_time = saved_diagnostic.get('remaining_time_seconds', 30 * 60) if saved_diagnostic else 30 * 60
+        
         return jsonify({
             "diagnostic_id": diagnostic_id,
             "chapter": chapter,
             "diagnostic_test": diagnostic.get("diagnostic_test", []),
             "total_questions": len(diagnostic.get("diagnostic_test", [])),
-            "time_limit": 30
+            "time_limit": 30,
+            "created_at": created_at,
+            "remaining_time_seconds": remaining_time,  # Return stored remaining time
+            "is_existing": False  # Flag to indicate this is a newly generated diagnostic
         }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/get-diagnostic', methods=['POST'])
+def get_diagnostic():
+    """
+    Get existing diagnostic for user and chapter (if exists)
+    Returns existing diagnostic without generating new one
+    """
+    try:
+        data = request.json
+        user_id = data.get('user_id')
+        chapter = data.get('chapter')
+        
+        # Validate request
+        if not user_id or not chapter:
+            return jsonify({"error": "Missing user_id or chapter"}), 400
+        
+        if chapter not in AVAILABLE_CHAPTERS:
+            return jsonify({"error": f"Chapter '{chapter}' not available"}), 400
+        
+        # Check if diagnostic was already generated
+        existing_diagnostic = supabase_service.get_existing_diagnostic(user_id, chapter)
+        if existing_diagnostic:
+            test_data = existing_diagnostic.get('test_data', {})
+            # Use stored remaining_time_seconds if available, otherwise calculate from created_at
+            remaining_time = existing_diagnostic.get('remaining_time_seconds')
+            if remaining_time is None:
+                # Fallback: calculate from created_at if remaining_time_seconds not set
+                created_at = existing_diagnostic.get('created_at')
+                if created_at:
+                    from datetime import datetime, timezone
+                    start_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    current_time = datetime.now(timezone.utc)
+                    elapsed_seconds = int((current_time - start_time).total_seconds())
+                    remaining_time = max(0, (30 * 60) - elapsed_seconds)
+                else:
+                    remaining_time = 30 * 60
+            
+            return jsonify({
+                "diagnostic_id": existing_diagnostic.get('id'),
+                "chapter": chapter,
+                "diagnostic_test": test_data.get("diagnostic_test", []),
+                "total_questions": len(test_data.get("diagnostic_test", [])),
+                "time_limit": 30,
+                "created_at": existing_diagnostic.get('created_at'),
+                "remaining_time_seconds": remaining_time,  # Use stored or calculated remaining time
+                "is_existing": True
+            }), 200
+        else:
+            return jsonify({
+                "error": "No existing diagnostic found"
+            }), 404
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/update-diagnostic-timer', methods=['POST'])
+def update_diagnostic_timer():
+    """
+    Update remaining time for diagnostic test
+    Called periodically to save timer state so it persists across logouts
+    Handles both regular JSON requests and sendBeacon (blob) requests
+    """
+    try:
+        # Handle sendBeacon (blob) or regular JSON request
+        if request.content_type and 'application/json' in request.content_type:
+            data = request.json
+        else:
+            # Handle sendBeacon blob - read as text and parse
+            try:
+                data_str = request.data.decode('utf-8')
+                data = json.loads(data_str)
+            except:
+                # Fallback: try to get JSON from request
+                data = request.get_json() or {}
+        
+        diagnostic_id = data.get('diagnostic_id')
+        remaining_time_seconds = data.get('remaining_time_seconds')
+        
+        # Validate request
+        if not diagnostic_id or remaining_time_seconds is None:
+            return jsonify({"error": "Missing diagnostic_id or remaining_time_seconds"}), 400
+        
+        # Ensure remaining_time_seconds is a valid integer
+        try:
+            remaining_time_seconds = int(remaining_time_seconds)
+        except (ValueError, TypeError):
+            return jsonify({"error": "Invalid remaining_time_seconds"}), 400
+        
+        # Update timer in database
+        success = supabase_service.update_diagnostic_timer(diagnostic_id, remaining_time_seconds)
+        if not success:
+            return jsonify({"error": "Failed to update timer"}), 500
+        
+        return jsonify({"message": "Timer updated successfully"}), 200
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500

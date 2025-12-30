@@ -36,6 +36,13 @@ class ApiService {
     })
   }
 
+  async getDiagnostic(userId, chapter) {
+    return this.request('/get-diagnostic', {
+      method: 'POST',
+      body: { user_id: userId, chapter },
+    })
+  }
+
   async submitDiagnostic(userId, diagnosticId, answers) {
     return this.request('/submit-diagnostic', {
       method: 'POST',
@@ -57,6 +64,20 @@ class ApiService {
     return this.request('/generate-roadmap', {
       method: 'POST',
       body: { user_id: userId },
+    })
+  }
+
+  async resetPassword(username, newPassword) {
+    return this.request('/reset-password', {
+      method: 'POST',
+      body: { username, new_password: newPassword },
+    })
+  }
+
+  async updateDiagnosticTimer(diagnosticId, remainingTimeSeconds) {
+    return this.request('/update-diagnostic-timer', {
+      method: 'POST',
+      body: { diagnostic_id: diagnosticId, remaining_time_seconds: remainingTimeSeconds },
     })
   }
 }

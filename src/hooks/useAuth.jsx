@@ -26,7 +26,22 @@ export const AuthProvider = ({ children }) => {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null)
+      const newUser = session?.user ?? null
+      
+      // Only update user if the ID actually changed (prevents unnecessary re-renders)
+      setUser((prevUser) => {
+        const prevUserId = prevUser?.id
+        const newUserId = newUser?.id
+        
+        // If IDs are the same, return previous user object to maintain reference stability
+        if (prevUserId === newUserId) {
+          return prevUser
+        }
+        
+        // Only update if ID changed or user state changed (logged in/out)
+        return newUser
+      })
+      
       setLoading(false)
     })
 
