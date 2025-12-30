@@ -11,7 +11,18 @@ from utils.validators import validate_diagnostic_request, validate_submission
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:5173", "http://localhost:3000"])
+# Allow CORS from localhost and Vercel deployment
+allowed_origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://ai-tutor-theta-rust.vercel.app",  # Vercel deployment
+    os.getenv("FRONTEND_URL", "")  # Additional frontend URL from env
+]
+# Filter out empty strings
+allowed_origins = [origin for origin in allowed_origins if origin]
+# Allow all origins for development (more permissive)
+# For production, use: CORS(app, origins=allowed_origins)
+CORS(app, origins="*", supports_credentials=False)
 
 # Initialize services
 gemini_service = GeminiService()
